@@ -1,5 +1,5 @@
 ## Linear VAE Optimizer Dynamics
-This repository contains the codebase to reproduce the findings of the research comparing Adam against one-pass Stochastic Gradient Descent (SGD) in training linear Variational Autoencoders (VAEs). The study investigates whether Adam alters posterior collapse thresholds, or changes generalization dynamics compared to the exact deterministic limits established for vanilla SGD.
+This repository contains the codebase to reproduce the findings of the research comparing Adam against one-pass Stochastic Gradient Descent (SGD) in training linear Variational Autoencoders (VAEs). The study investigates whether Adam shifts phase boundaries, alters posterior collapse thresholds, or changes generalization dynamics compared to the exact deterministic limits established for vanilla SGD.
 
 ## Setup and Requirements
 To run the experiments, you will need Python installed along with a few numerical and machine learning libraries. Create a virtual environment and install the following libraries:
