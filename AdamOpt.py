@@ -1,33 +1,3 @@
-"""
-Adam vs. SGD learning dynamics in the linear VAE
-=================================================
-Experimental suite that VERIFIES or FALSIFIES the theoretical claims developed in
-`adam_linear_vae_framework.md`, built directly on the original paper code
-(Ichikawa & Hukushima, AISTATS 2024) so the comparison is apples-to-apples.
-
-Claims under test (see framework Sec. 8 & 10):
-  A. Phase-boundary invariance + speedup.
-       - Fixed points (hence collapse threshold beta* = rho+eta and the optimal
-         point beta = eta) are UNCHANGED by Adam; only the *kinetics* change.
-       - At matched base learning rate Adam escapes the plateau faster.
-  B. Concentration: order parameters still concentrate as N grows under Adam,
-       i.e. an N->inf deterministic (ODE) limit exists.
-  C. Preconditioner delocalization: Var_i(v_hat) / mean_i(v_hat) for Adam's
-       second-moment buffer stays small  =>  the mean-field "Level 1" theory
-       (scalar per-column effective LR) is exact at leading order. We also track
-       the momentum-signal overlap a_W = (1/N) m_hat . W*  (does momentum LEAD m?).
-  D. KL-annealing window: with tanh annealing beta(t)=tanh(gamma t), Adam should
-       RELAX the slow-annealing penalty that Thm 5.4 imposes on SGD (wider /
-       shifted admissible gamma window).
-  E. Model mismatch (M=2, M*=1): does Adam's per-dimension braking suppress or
-       accelerate the small-beta (beta<eta) overfitting of the superfluous latent?
-
-Each experiment saves a publication-style matplotlib figure to OUTDIR.
-
-Set QUICK=False for paper-quality runs (long, multi-seed). QUICK=True is a fast
-demonstration pass.
-"""
-
 import os
 import copy
 import random
@@ -39,15 +9,12 @@ from tqdm import tqdm
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# --------------------------------------------------------------------------------------
 # Global configuration
-# --------------------------------------------------------------------------------------
-QUICK = True                      # <-- set False for paper-quality runs
 OUTDIR = "."
 DEVICE = "cpu"
-RHO, ETA = 1.0, 1.0               # signal / noise strength; collapse threshold = RHO+ETA
-THRESH_COLLAPSE = RHO + ETA       # beta* (= 2.0)
-THRESH_OPT = ETA                  # optimal generalization (= 1.0)
+RHO, ETA = 1.0, 1.0
+THRESH_COLLAPSE = RHO + ETA
+THRESH_OPT = ETA
 
 RUN = {"A": True, "B": True, "C": True, "D": True, "E": True}
 
@@ -58,9 +25,7 @@ plt.rcParams.update({
 C_SGD, C_ADAM, C_MOM, C_THEORY = "#1f77b4", "#d62728", "#2ca02c", "0.25"
 
 
-# --------------------------------------------------------------------------------------
-# Core model / data / observables  (faithful to the original paper code)
-# --------------------------------------------------------------------------------------
+# Core model / data / observables
 def fix_seed(seed):
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -78,9 +43,9 @@ def generate_data_from_SCM(N, Mstar, W0, eta=ETA, rho=RHO, device=DEVICE):
 class LinearVAE(nn.Module):
     def __init__(self, input_dim, latent_dim, W_init=None, tW_init=None):
         super().__init__()
-        self.dec = nn.Linear(latent_dim, input_dim, bias=False)   # weight: (N, M)
-        self.mu = nn.Linear(input_dim, latent_dim, bias=False)    # weight: (M, N)
-        self.var = nn.Parameter(torch.ones(latent_dim))           # encoder covariance D (diag)
+        self.dec = nn.Linear(latent_dim, input_dim, bias=False)
+        self.mu = nn.Linear(input_dim, latent_dim, bias=False)
+        self.var = nn.Parameter(torch.ones(latent_dim))
         if W_init is None:
             self.dec.weight = nn.Parameter(torch.randn(input_dim, latent_dim))
             self.mu.weight = nn.Parameter(torch.randn(latent_dim, input_dim))
@@ -113,12 +78,12 @@ def criterion(model, hat_x, x, mu, var, beta=1.0, reg_param=0.0):
 
 
 def observables(model, W0, device=DEVICE):
-    """Return dict of order parameters and generalization error eg."""
+    # Return dict of order parameters and generalization error eg.
     N = model.dec.weight.size(0)
     M = model.dec.weight.size(1)
-    Mcross = (model.dec.weight.T @ W0) / N           # (M, M*)  decoder-signal overlap  (= paper m)
-    tM = (model.mu.weight @ W0) / N                  # (M, M*)  encoder-signal overlap  (= paper d)
-    Q = (model.dec.weight.T @ model.dec.weight) / N  # (M, M)
+    Mcross = (model.dec.weight.T @ W0) / N
+    tM = (model.mu.weight @ W0) / N
+    Q = (model.dec.weight.T @ model.dec.weight) / N
     if M == 1:
         m = Mcross.flatten()[0]; q = Q.flatten()[0]
         eg = (1 - 2 * torch.abs(m) + q).item()
@@ -130,9 +95,7 @@ def observables(model, W0, device=DEVICE):
                 "mvec": Mcross.flatten().detach().tolist(), "v": model.var.detach().tolist()}
 
 
-# --------------------------------------------------------------------------------------
 # Optimizer factory + beta schedule
-# --------------------------------------------------------------------------------------
 def make_optimizer(model, kind, lr, N, betas=(0.9, 0.999), momentum=0.9, alpha=0.999):
     """Same parameter-group structure for every optimizer so the only thing that
     changes is the update rule (var keeps the paper's 1/N step convention)."""
@@ -151,7 +114,7 @@ def make_optimizer(model, kind, lr, N, betas=(0.9, 0.999), momentum=0.9, alpha=0
 
 
 def beta_value(anneal, t_cont, beta_const, gamma):
-    """t_cont is *continuous* time = step / N (matches the paper's annealing clock)."""
+    # t_cont is *continuous* time = step / N (matches the paper's annealing clock).
     if anneal == "const":
         return beta_const
     if anneal == "tanh":
@@ -161,9 +124,7 @@ def beta_value(anneal, t_cont, beta_const, gamma):
     raise ValueError(anneal)
 
 
-# --------------------------------------------------------------------------------------
 # Generalized one-pass trainer
-# --------------------------------------------------------------------------------------
 def run_training(N, latent_dim, optimizer_kind, beta_const=1.0, anneal="const", gamma=0.0,
                  num_steps=60000, lr=0.01, rho=RHO, eta=ETA, reg_param=0.0,
                  betas=(0.9, 0.999), momentum=0.9, seed=0, record_interval=50,
@@ -186,7 +147,7 @@ def run_training(N, latent_dim, optimizer_kind, beta_const=1.0, anneal="const", 
         loss, _, _ = criterion(model, recon, x, mu, var, beta=b, reg_param=reg_param)
         opt.zero_grad(); loss.backward(); opt.step()
         with torch.no_grad():
-            model.var.clamp_(min=1e-8)        # keep encoder covariance positive (Lemma C.5 analogue)
+            model.var.clamp_(min=1e-8)
 
         if step % record_interval == 0:
             ob = observables(model, W0, device=device)
@@ -194,10 +155,10 @@ def run_training(N, latent_dim, optimizer_kind, beta_const=1.0, anneal="const", 
             rec["Qdiag"].append(ob["Qdiag"]); rec["mvec"].append(ob["mvec"]); rec["v"].append(ob["v"])
             if probe_adam and optimizer_kind == "adam" and model.dec.weight in opt.state:
                 st = opt.state[model.dec.weight]
-                v_buf = st["exp_avg_sq"][:, 0]                 # second moment, latent column 0
-                m_buf = st["exp_avg"][:, 0]                    # first moment,  latent column 0
-                cv = (v_buf.std() / (v_buf.mean() + 1e-12)).item()    # coefficient of variation
-                aW = (m_buf @ W0[:, 0] / N).item()             # momentum-signal overlap
+                v_buf = st["exp_avg_sq"][:, 0]
+                m_buf = st["exp_avg"][:, 0]
+                cv = (v_buf.std() / (v_buf.mean() + 1e-12)).item()
+                aW = (m_buf @ W0[:, 0] / N).item()
                 rec["deloc"].append(cv); rec["aW"].append(aW)
             else:
                 rec["deloc"].append(np.nan); rec["aW"].append(np.nan)
@@ -205,7 +166,7 @@ def run_training(N, latent_dim, optimizer_kind, beta_const=1.0, anneal="const", 
 
 
 def eg_star_theory(beta, rho=RHO, eta=ETA):
-    """Steady-state generalization error from Theorem 5.1 (model-matched)."""
+    # Steady-state generalization error from Theorem 5.1 (model-matched)
     P = rho + eta
     if beta < P:
         s = np.sqrt(P - beta)
@@ -214,13 +175,13 @@ def eg_star_theory(beta, rho=RHO, eta=ETA):
 
 
 def steady_value(rec, frac=0.2):
-    """Average eg over the last `frac` of the trajectory (proxy for the steady state)."""
+    # Average eg over the last `frac` of the trajectory (proxy for the steady state).
     arr = np.array(rec["eg"]); k = max(1, int(len(arr) * frac))
     return float(np.mean(arr[-k:]))
 
 
 def convergence_time(rec, target, tol_window=3):
-    """First continuous time at which eg drops below `target` and stays below."""
+    # First continuous time at which eg drops below `target` and stays below.
     t = np.array(rec["t"]); eg = np.array(rec["eg"])
     below = eg < target
     for i in range(len(below) - tol_window):
@@ -229,18 +190,12 @@ def convergence_time(rec, target, tol_window=3):
     return float(t[-1])  # never converged within the run
 
 
-# ======================================================================================
 # Experiment A : phase-boundary invariance + speedup
-# ======================================================================================
 def experiment_A():
     print("\n=== Experiment A: phase-boundary invariance + speedup ===")
-    if QUICK:
-        betas_scan = [0.5, 1.0, 1.5, 1.8, 2.0, 2.5]; seeds = [0, 1]; N = 120; steps = 24000; ri = 40
-        curve_betas = [1.0, 1.8, 2.0]
-    else:
-        betas_scan = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.8, 2.0, 2.25, 2.5]
-        seeds = [0, 1, 2, 3, 4]; N = 500; steps = 200 * 1500; ri = 200
-        curve_betas = [1.0, 1.8, 2.0, 2.25]
+    betas_scan = [0.5, 1.0, 1.5, 1.8, 2.0, 2.5]; seeds = [0, 1]; N = 120; steps = 24000; ri = 40
+    curve_betas = [1.0, 1.8, 2.0]
+
     # safety: curves are only recorded for betas that are actually swept
     curve_betas = [b for b in curve_betas if b in betas_scan]
     lr = 0.01
@@ -274,7 +229,7 @@ def experiment_A():
     np.atleast_1d(axes)[0].set_ylabel(r"$\varepsilon_g$")
     np.atleast_1d(axes)[0].legend(loc="upper right", fontsize=9)
     fig.suptitle("A1  Speedup at matched learning rate (Adam reaches the SAME steady state faster)")
-    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "expA1_speedup_curves.png")); plt.close(fig)
+    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "0expA1_speedup_curves.pdf")); plt.close(fig)
 
     # ---- Figure A2: steady-state eg vs beta with theory overlay ----
     fig, ax = plt.subplots(figsize=(6.6, 4.6))
@@ -292,19 +247,14 @@ def experiment_A():
     ax.set_xlabel(r"$\beta$"); ax.set_ylabel(r"steady-state $\varepsilon_g$"); ax.set_ylim(-0.05, 1.15)
     ax.legend(loc="lower right", fontsize=9)
     ax.set_title("A2  Fixed points are invariant under Adam\n(same minimum at $\\beta=\\eta$, same collapse at $\\beta=\\rho+\\eta$)")
-    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "expA2_phase_boundary.png")); plt.close(fig)
-    print("  -> expA1_speedup_curves.png, expA2_phase_boundary.png")
+    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "0expA2_phase_boundary.pdf")); plt.close(fig)
+    print("  -> expA1_speedup_curves.png, expA2_phase_boundary.pdf")
 
 
-# ======================================================================================
 # Experiment B : concentration (ODE limit exists for Adam)
-# ======================================================================================
 def experiment_B():
     print("\n=== Experiment B: concentration as N grows (Adam) ===")
-    if QUICK:
-        Ns = [60, 120, 240]; seeds = [0, 1, 2]; steps = 20000; ri = 40
-    else:
-        Ns = [125, 250, 500, 1000]; seeds = list(range(8)); steps = 150 * 1500; ri = 200
+    Ns = [60, 120, 240]; seeds = [0, 1, 2]; steps = 20000; ri = 40
     b, lr = 1.0, 0.01
 
     spread = {}
@@ -324,7 +274,7 @@ def experiment_B():
     ax1.set_xlabel(r"$t$"); ax1.set_ylabel(r"$\varepsilon_g$")
     ax1.set_title("B1  Trajectories sharpen as $N$ grows (Adam)")
     ax1.legend(fontsize=9); fig1.tight_layout()
-    fig1.savefig(os.path.join(OUTDIR, "expB1_concentration_curves.png")); plt.close(fig1)
+    fig1.savefig(os.path.join(OUTDIR, "0expB1_concentration_curves.pdf")); plt.close(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(5.6, 4.4))
     Nv = np.array(Ns, float); sv = np.array([spread[N] for N in Ns])
@@ -333,19 +283,14 @@ def experiment_B():
     ax2.set_xlabel(r"$N$"); ax2.set_ylabel(r"mean$_t\,$ std$_{\rm seeds}(\varepsilon_g)$")
     ax2.set_title(r"B2  Fluctuations vanish at the Thm-4.2 rate $O(1/\sqrt{N})$")
     ax2.legend(fontsize=9); fig2.tight_layout()
-    fig2.savefig(os.path.join(OUTDIR, "expB2_concentration_rate.png")); plt.close(fig2)
-    print("  -> expB1_concentration_curves.png, expB2_concentration_rate.png")
+    fig2.savefig(os.path.join(OUTDIR, "0expB2_concentration_rate.pdf")); plt.close(fig2)
+    print("  -> expB1_concentration_curves.png, expB2_concentration_rate.pdf")
 
 
-# ======================================================================================
 # Experiment C : preconditioner delocalization + momentum-signal overlap
-# ======================================================================================
 def experiment_C():
     print("\n=== Experiment C: preconditioner delocalization & momentum overlap ===")
-    if QUICK:
-        Ns = [120, 240]; steps = 24000; ri = 40; seed = 0
-    else:
-        Ns = [250, 500, 1000]; steps = 150 * 1500; ri = 200; seed = 0
+    Ns = [120, 240]; steps = 24000; ri = 40; seed = 0
     b, lr = 1.0, 0.01
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(11, 4.4))
@@ -367,71 +312,89 @@ def experiment_C():
     axR2.set_ylabel(r"momentum overlap $a_W$ (solid)")
     axR.set_title("C2  Momentum overlap peaks during the transition,\nvanishes at the fixed point (gradient $\\to 0$)")
     axR.legend(fontsize=8, loc="lower left")
-    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "expC_delocalization.png")); plt.close(fig)
-    print("  -> expC_delocalization.png")
+    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "0expC_delocalization.pdf")); plt.close(fig)
+    print("  -> expC_delocalization.pdf")
 
 
-# ======================================================================================
 # Experiment D : KL-annealing window (Thm 5.4 under Adam)
-# ======================================================================================
 def experiment_D():
     print("\n=== Experiment D: KL-annealing window (tanh) ===")
-    # beta(t) = tanh(gamma * t_cont); ends at beta -> 1 = eta  =>  eg* = 0, target 0.001
-    if QUICK:
-        gammas = [4e-3, 8e-3, 1.6e-2, 3.2e-2]; seeds = [0]; N = 120; lr = 0.5; tmax = 600
-    else:
-        gammas = [0.5e-4, 1e-4, 2e-4, 4e-4, 8e-4, 1.6e-3]; seeds = [0, 1, 2]; N = 250; lr = 1.0; tmax = 25000
+    gammas = [2e-3, 5e-3, 1e-2, 2e-2, 5e-2]; seeds = [0, 1]
+    N = 120; lr = 0.05; tmax = 350
     steps = int(tmax * N); ri = max(20, steps // 1500)
-    target = 0.001
+    TOL = 0.05
+
+    def conv_time(rec, target, w=5):
+        """First continuous time eg (lightly smoothed) drops below target and
+        STAYS below through the end of the run (robust to small-beta dips)."""
+        eg = np.array(rec["eg"]); t = np.array(rec["t"])
+        if len(eg) >= w:
+            eg = np.convolve(eg, np.ones(w) / w, mode="same")
+        below = eg < target
+        above_idx = np.where(~below)[0]
+        if len(above_idx) == 0:
+            return float(t[0])
+        idx = above_idx[-1] + 1
+        if idx >= len(t):
+            return float(t[-1])
+        return float(t[idx])
 
     conv = {opt: {g: [] for g in gammas} for opt in ["sgd", "adam"]}
     const = {opt: [] for opt in ["sgd", "adam"]}
+    floor = {opt: [] for opt in ["sgd", "adam"]}
     sample_curves = {}
     for seed in tqdm(seeds):
         Wi = torch.randn(N, 1); tWi = torch.randn(1, N)
         for opt in ["sgd", "adam"]:
+            # constant-beta=1 baseline defines this optimizer's reachable steady state
             rc = run_training(N, 1, opt, beta_const=1.0, anneal="const", num_steps=steps,
                               lr=lr, seed=seed, record_interval=ri, W_init=Wi, tW_init=tWi)
-            const[opt].append(convergence_time(rc, target))
-            for g in tqdm(gammas):
+            f = steady_value(rc, frac=0.2); floor[opt].append(f)
+            target = f + TOL
+            const[opt].append(conv_time(rc, target))
+            for g in gammas:
                 rg = run_training(N, 1, opt, anneal="tanh", gamma=g, num_steps=steps,
                                   lr=lr, seed=seed, record_interval=ri, W_init=Wi, tW_init=tWi)
-                conv[opt][g].append(convergence_time(rg, target))
+                conv[opt][g].append(conv_time(rg, target))
                 if seed == 0 and abs(g - gammas[len(gammas) // 2]) < 1e-12:
                     sample_curves[opt] = (np.array(rg["t"]), np.array(rg["eg"]), np.array(rg["beta"]))
         print(f"  seed {seed} done")
+
+    # sanity diagnostic: did the constant-beta baselines actually settle near eg*~0?
+    for opt in ["sgd", "adam"]:
+        print(f"  {opt.upper()} const-beta=1 steady eg = {np.mean(floor[opt]):.3f}  "
+              f"(target = steady + {TOL})")
 
     fig, (axT, axB) = plt.subplots(2, 1, figsize=(6.8, 7.2))
     for opt, col in [("sgd", C_SGD), ("adam", C_ADAM)]:
         t, eg, bt = sample_curves[opt]
         axT.plot(t, eg, color=col, label=rf"$\varepsilon_g$ {opt.upper()}")
         axT.plot(t, bt, color=col, ls="--", alpha=0.6, label=rf"$\beta(t)$ {opt.upper()}")
-    axT.set_xlabel(r"$t$"); axT.set_ylabel("value"); axT.set_ylim(-0.05, 1.6)
-    axT.legend(fontsize=8, ncol=2); axT.set_title("D1  tanh KL annealing trajectory (mid $\\gamma$)")
+    axT.set_xlabel(r"$t$"); axT.set_ylabel("value"); axT.set_ylim(-0.05, 1.4)
+    axT.legend(fontsize=8, ncol=2)
+    axT.set_title(rf"D1  tanh KL annealing trajectory (mid $\gamma={gammas[len(gammas)//2]:g}$)")
 
     for opt, col, mk in [("sgd", C_SGD, "o"), ("adam", C_ADAM, "s")]:
         mean = [np.mean(conv[opt][g]) for g in gammas]
         std = [np.std(conv[opt][g]) for g in gammas]
-        axB.errorbar(gammas, mean, yerr=std, fmt=mk + "-", color=col, capsize=3, label=f"{opt.upper()} (annealed)")
-        axB.axhline(np.mean(const[opt]), color=col, ls=":", lw=1.4, label=f"{opt.upper()} (const $\\beta=1$)")
+        axB.errorbar(gammas, mean, yerr=std, fmt=mk + "-", color=col, capsize=3,
+                     label=f"{opt.upper()} (annealed)")
+        axB.axhline(np.mean(const[opt]), color=col, ls=":", lw=1.4,
+                    label=f"{opt.upper()} (const $\\beta=1$)")
     axB.set_xscale("log"); axB.set_xlabel(r"annealing rate $\gamma$")
-    axB.set_ylabel(r"convergence time to $\varepsilon_g^*+0.001$")
-    axB.set_title("D2  Adam relaxes the slow-annealing penalty (lower / flatter curve)")
+    axB.set_ylabel(rf"convergence time to $\varepsilon_g^*+{TOL}$")
+    axB.set_title(r"D2  Convergence time vs annealing rate $\gamma$")
     axB.legend(fontsize=8)
-    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "expD_annealing_window.png")); plt.close(fig)
-    print("  -> expD_annealing_window.png")
+    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "0expD_annealing_window.pdf")); plt.close(fig)
+    print("  -> 0expD_annealing_window.pdf")
 
 
-# ======================================================================================
 # Experiment E : model mismatch (M=2, M*=1), small-beta overfitting
-# ======================================================================================
 def experiment_E():
     print("\n=== Experiment E: model mismatch (M=2, M*=1) ===")
-    if QUICK:
-        seeds = [0, 1]; N = 120; steps = 28000; ri = 40
-    else:
-        seeds = list(range(5)); N = 500; steps = 200 * 1500; ri = 200
-    b, lr = 0.5, 0.01      # beta < eta => regime where the superfluous latent overfits noise
+
+    seeds = [0, 1]; N = 120; steps = 28000; ri = 40
+    b, lr = 0.5, 0.01
 
     res = {opt: {"eg": [], "supQ": []} for opt in ["sgd", "adam"]}
     for seed in tqdm(seeds):
@@ -439,12 +402,12 @@ def experiment_E():
         for opt in ["sgd", "adam"]:
             rec = run_training(N, 2, opt, beta_const=b, num_steps=steps, lr=lr,
                                seed=seed, record_interval=ri, W_init=Wi, tW_init=tWi, Mstar=1)
-            mvec = np.array(rec["mvec"])              # (T, 2) decoder-signal overlap per latent
-            Qd = np.array(rec["Qdiag"])               # (T, 2)
-            sig = np.argmax(np.abs(mvec[-1]))         # latent aligned with the signal
-            sup = 1 - sig                             # the superfluous latent
+            mvec = np.array(rec["mvec"])
+            Qd = np.array(rec["Qdiag"])
+            sig = np.argmax(np.abs(mvec[-1]))
+            sup = 1 - sig
             res[opt]["eg"].append(rec["eg"])
-            res[opt]["supQ"].append(Qd[:, sup])       # energy the superfluous latent puts into noise
+            res[opt]["supQ"].append(Qd[:, sup])
         T = np.array(rec["t"])
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(11, 4.4))
@@ -458,12 +421,10 @@ def experiment_E():
     axL.set_title(rf"E1  Generalization, mismatch, $\beta={b}<\eta$"); axL.legend(fontsize=9)
     axR.set_xlabel(r"$t$"); axR.set_ylabel(r"$Q_{\rm sup}$ (superfluous-latent energy)")
     axR.set_title("E2  Background-noise overfitting of the superfluous latent"); axR.legend(fontsize=9)
-    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "expE_mismatch.png")); plt.close(fig)
-    print("  -> expE_mismatch.png")
-
+    fig.tight_layout(); fig.savefig(os.path.join(OUTDIR, "0expE_mismatch.pdf")); plt.close(fig)
+    print("  -> expE_mismatch.pdf")
 
 # --------------------------------------------------------------------------------------
-print(f"QUICK={QUICK}  (set False for paper-quality runs)")
 print(f"OUTDIR={OUTDIR}")
 print("Test if saving to outdir works")
 with open(os.path.join(OUTDIR, "test.txt"), "w") as f:
